@@ -35,19 +35,28 @@ proc = subprocess.Popen(
     cwd=str(ROOT),
 )
 
-# Đợi server up + warm (Searcher.from_corpus loads embeddings + indexes 1000 docs)
+# Đợi server up + warm (Searcher.from_corpus loads embeddings + indexes 1000 docs).
+# 60 s đủ trên máy khoẻ, nhưng khi RAM eo hẹp bước embed 1000 doc bị đẩy xuống swap
+# và có thể mất vài phút. Chờ tối đa 15 phút, in tiến trình để phân biệt "đang chậm"
+# với "đã treo" — im lặng 10 phút trông giống hệt nhau nếu không in gì.
 URL = "http://localhost:8000"
-for _ in range(60):
+WAIT_S = 900
+t_start = time.perf_counter()
+for i in range(WAIT_S):
     try:
         r = httpx.get(f"{URL}/healthz", timeout=2.0)
         if r.status_code == 200 and r.json().get("ready"):
             break
     except httpx.HTTPError:
         pass
+    if i and i % 30 == 0:
+        print(f"  … đang chờ server khởi động ({i}s)")
     time.sleep(1)
 else:
-    raise RuntimeError("API didn't become ready within 60s")
+    proc.terminate()
+    raise RuntimeError(f"API didn't become ready within {WAIT_S}s")
 
+print(f"Server ready sau {time.perf_counter() - t_start:.1f}s")
 print(httpx.get(f"{URL}/healthz").json())
 
 # %% [markdown]
@@ -102,6 +111,14 @@ def benchmark_mode(mode: str, reps: int = 2) -> dict[str, float]:
     }
 
 
+# Warm-up trước khi đo. Call đầu tiên của mỗi mode phải nạp ONNX graph vào cache
+# và cấp phát arena của onnxruntime; gộp chúng vào phép đo thì P99 phản ánh cold
+# start chứ không phải steady-state latency mà rubric hỏi.
+for _mode in ("keyword", "semantic", "hybrid"):
+    for _q in golden[:10]:
+        httpx.get(f"{URL}/search", params={"q": _q["query"], "mode": _mode})
+print("Warm-up xong (30 call), bắt đầu đo")
+
 print(f"  {'mode':10}  {'P50':>7}  {'P95':>7}  {'P99':>7}  {'P99(wall)':>9}")
 results = {}
 for mode in ("keyword", "semantic", "hybrid"):
@@ -127,9 +144,18 @@ else:
 # ## 5. Cleanup — stop the API server
 
 # %%
+# uvicorn cần dọn lifespan (giải phóng Searcher + 1000 vector) trước khi thoát, nên
+# 5 s là quá ngắn khi máy đang tải nặng — và một TimeoutExpired ở đây để lại server
+# sống tiếp, giữ cổng 8000 cùng ~700 MB RAM cho tới hết phiên. Đó chính là cách
+# 2 uvicorn mồ côi tích lại trong lần chạy trước.
 proc.terminate()
-proc.wait(timeout=5)
-print("API server stopped")
+try:
+    proc.wait(timeout=30)
+    print("API server stopped")
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait(timeout=10)
+    print("API server killed (terminate quá 30s)")
 
 # %% [markdown]
 # ## Deliverable evidence

@@ -183,19 +183,49 @@ else:
 
 # %%
 import pandas as pd
+
+PIT_FEATURES = [
+    "user_profile_features:reading_speed_wpm",
+    "user_profile_features:topic_affinity",
+]
+
+# Mốc thời gian phải nằm SAU thời điểm feature được ghi, nếu không PIT join không
+# có giá trị hợp lệ nào để trả về. `make_user_profile` (§1) ghi feature của u_00i
+# lúc NOW − i giờ, nên u_001 = NOW−1h, u_002 = NOW−2h, u_003 = NOW−3h.
 entity_df = pd.DataFrame({
     "user_id": ["u_001", "u_002", "u_003"],
-    "event_timestamp": [NOW - timedelta(hours=2), NOW - timedelta(hours=1), NOW],
+    "event_timestamp": [NOW, NOW - timedelta(minutes=30), NOW - timedelta(minutes=45)],
 })
 
 historical = fs.get_historical_features(
     entity_df=entity_df,
-    features=[
-        "user_profile_features:reading_speed_wpm",
-        "user_profile_features:topic_affinity",
-    ],
+    features=PIT_FEATURES,
 ).to_df()
 print(historical)
+print(f"\nPIT join trả về {len(historical)} dòng × {historical.shape[1]} cột")
+assert len(historical) == 3, f"expected 3 rows, got {len(historical)}"
+
+# %% [markdown]
+# ### Điều gì xảy ra khi mốc thời gian nằm TRƯỚC feature?
+#
+# Đây là nửa còn lại của bài học. PIT join không "tìm giá trị gần nhất" — nó chỉ
+# được phép nhìn về quá khứ. Hỏi feature của `u_001` tại `NOW − 2h`, trong khi giá
+# trị duy nhất của user này được ghi lúc `NOW − 1h`, thì câu trả lời đúng là
+# *không có gì* — chứ không phải giá trị của một giờ sau đó. Nếu Feast trả về giá
+# trị đó, model huấn luyện sẽ dùng thông tin từ tương lai và training-serving skew
+# xuất hiện ngay: offline đẹp, online tệ.
+
+# %%
+early_df = pd.DataFrame({
+    "user_id": ["u_001"],
+    "event_timestamp": [NOW - timedelta(hours=2)],   # sớm hơn feature ts (NOW − 1h)
+})
+early = fs.get_historical_features(entity_df=early_df, features=PIT_FEATURES).to_df()
+n_valid = int(early["reading_speed_wpm"].notna().sum()) if len(early) else 0
+print(f"Hỏi u_001 tại NOW−2h (feature ghi lúc NOW−1h):")
+print(f"  số dòng trả về      : {len(early)}")
+print(f"  số dòng CÓ giá trị  : {n_valid}   ← 0 nghĩa là PIT join đã chặn rò rỉ đúng")
+print(early)
 
 # %% [markdown]
 # ## Deliverable evidence
